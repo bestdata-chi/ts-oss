@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.bestdata.em</groupId>
+        <artifactId>ts-oss-parent</artifactId>
+<!--        <version>1.0.0-SNAPSHOT</version>-->
+        <version>1.0.1</version>
+    </parent>
+
+    <artifactId>ts-oss-spring-boot-starter</artifactId>
+    <name>ts-oss-spring-boot-starter</name>
+    <description>Spring Boot 自动配置，主服务直接引入即可注入客户端</description>
+
+    <dependencies>
+        <dependency>
+            <groupId>com.bestdata.em</groupId>
+            <artifactId>ts-oss-core</artifactId>
+        </dependency>
+        <!-- 默认实现，主服务无需再单独引入 -->
+        <dependency>
+            <groupId>com.bestdata.em</groupId>
+            <artifactId>ts-oss-tdengine</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-autoconfigure</artifactId>
+        </dependency>
+        <!-- 生成配置元数据（IDE 提示），可选 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-configuration-processor</artifactId>
+            <optional>true</optional>
+        </dependency>
+    </dependencies>
+</project>

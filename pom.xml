@@ -1,0 +1,164 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>com.bestdata.em</groupId>
+    <artifactId>ts-oss-parent</artifactId>
+    <!-- <version>1.0.0-SNAPSHOT</version> -->
+    <version>1.0.1</version>
+    <packaging>pom</packaging>
+
+    <name>ts-oss-parent</name>
+    <description>
+        时序数据库连接器：为主服务提供时序数据库(TDengine)的连接、查询、写入、删除能力，
+        内部公共工具库，部署到阿里云效制品仓库。
+    </description>
+
+    <modules>
+        <module>ts-oss-api</module>
+        <module>ts-oss-core</module>
+        <module>ts-oss-tdengine</module>
+        <module>ts-oss-spring-boot-starter</module>
+    </modules>
+
+    <properties>
+        <java.version>21</java.version>
+        <maven.compiler.release>21</maven.compiler.release>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+
+        <spring-boot.version>3.3.5</spring-boot.version>
+        <taos-jdbcdriver.version>3.4.0</taos-jdbcdriver.version>
+        <iotdb-session.version>1.3.2</iotdb-session.version>
+
+    </properties>
+
+    <dependencyManagement>
+        <dependencies>
+            <!-- Spring Boot BOM，统一托管版本 -->
+            <dependency>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-dependencies</artifactId>
+                <version>${spring-boot.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+
+            <!-- 本工程内部模块 -->
+            <dependency>
+                <groupId>com.bestdata.em</groupId>
+                <artifactId>ts-oss-api</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.bestdata.em</groupId>
+                <artifactId>ts-oss-core</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.bestdata.em</groupId>
+                <artifactId>ts-oss-tdengine</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.bestdata.em</groupId>
+                <artifactId>ts-oss-iotdb</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.bestdata.em</groupId>
+                <artifactId>ts-oss-spring-boot-starter</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+
+            <!-- TDengine JDBC 驱动 -->
+            <dependency>
+                <groupId>com.taosdata.jdbc</groupId>
+                <artifactId>taos-jdbcdriver</artifactId>
+                <version>${taos-jdbcdriver.version}</version>
+            </dependency>
+
+            <!-- Apache IoTDB 原生会话 -->
+            <dependency>
+                <groupId>org.apache.iotdb</groupId>
+                <artifactId>iotdb-session</artifactId>
+                <version>${iotdb-session.version}</version>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
+    <build>
+        <pluginManagement>
+            <plugins>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-compiler-plugin</artifactId>
+                    <version>3.13.0</version>
+                    <configuration>
+                        <release>${maven.compiler.release}</release>
+                        <parameters>true</parameters>
+                    </configuration>
+                </plugin>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-surefire-plugin</artifactId>
+                    <version>3.2.5</version>
+                </plugin>
+                <plugin>
+                    <groupId>org.springframework.boot</groupId>
+                    <artifactId>spring-boot-maven-plugin</artifactId>
+                    <version>${spring-boot.version}</version>
+                </plugin>
+                <!-- 打包时附加 -sources.jar -->
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-source-plugin</artifactId>
+                    <version>3.3.1</version>
+                </plugin>
+                <!-- 打包时附加 -javadoc.jar -->
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-javadoc-plugin</artifactId>
+                    <version>3.11.2</version>
+                </plugin>
+            </plugins>
+        </pluginManagement>
+
+        <plugins>
+            <!-- 生成源码 jar，绑定到 package 阶段 -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-source-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>attach-sources</id>
+                        <goals>
+                            <goal>jar-no-fork</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+            <!-- 生成 javadoc jar，绑定到 package 阶段 -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-javadoc-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>attach-javadocs</id>
+                        <goals>
+                            <goal>jar</goal>
+                        </goals>
+                    </execution>
+                </executions>
+                <configuration>
+                    <source>21</source>
+                    <doclint>none</doclint>
+                    <quiet>true</quiet>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+
+</project>
