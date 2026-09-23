@@ -4,17 +4,46 @@
     xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
-    <groupId>com.bestdata.em</groupId>
+    <!-- groupId 使用 io.github.<GitHub用户名>，由 GitHub 自动验证域名所有权 -->
+    <groupId>io.github.bestdata-chi</groupId>
     <artifactId>ts-oss-parent</artifactId>
-    <!-- <version>1.0.0-SNAPSHOT</version> -->
     <version>1.0.1</version>
     <packaging>pom</packaging>
 
-    <name>ts-oss-parent</name>
+    <name>ts-oss</name>
     <description>
-        时序数据库连接器：为主服务提供时序数据库(TDengine)的连接、查询、写入、删除能力，
-        内部公共工具库，部署到阿里云效制品仓库。
+        时序数据库连接器：为主服务提供时序数据库（TDengine / Apache IoTDB）的连接、查询、写入、删除能力，
+        统一屏蔽底层引擎差异。
     </description>
+    <url>https://github.com/bestdata-chi/ts-oss</url>
+
+    <licenses>
+        <license>
+            <name>Apache License, Version 2.0</name>
+            <url>https://www.apache.org/licenses/LICENSE-2.0.txt</url>
+            <distribution>repo</distribution>
+        </license>
+    </licenses>
+
+    <developers>
+        <developer>
+            <id>bestdata-chi</id>
+            <name>ZhenyuChi</name>
+            <email>chizhenyu1206@gmail.com</email>
+        </developer>
+    </developers>
+
+    <scm>
+        <connection>scm:git:https://github.com/bestdata-chi/ts-oss.git</connection>
+        <developerConnection>scm:git:ssh://git@github.com/bestdata-chi/ts-oss.git</developerConnection>
+        <url>https://github.com/bestdata-chi/ts-oss</url>
+        <tag>HEAD</tag>
+    </scm>
+
+    <issueManagement>
+        <system>GitHub Issues</system>
+        <url>https://github.com/bestdata-chi/ts-oss/issues</url>
+    </issueManagement>
 
     <modules>
         <module>ts-oss-api</module>
@@ -48,27 +77,27 @@
 
             <!-- 本工程内部模块 -->
             <dependency>
-                <groupId>com.bestdata.em</groupId>
+                <groupId>io.github.bestdata-chi</groupId>
                 <artifactId>ts-oss-api</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>
-                <groupId>com.bestdata.em</groupId>
+                <groupId>io.github.bestdata-chi</groupId>
                 <artifactId>ts-oss-core</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>
-                <groupId>com.bestdata.em</groupId>
+                <groupId>io.github.bestdata-chi</groupId>
                 <artifactId>ts-oss-tdengine</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>
-                <groupId>com.bestdata.em</groupId>
+                <groupId>io.github.bestdata-chi</groupId>
                 <artifactId>ts-oss-iotdb</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>
-                <groupId>com.bestdata.em</groupId>
+                <groupId>io.github.bestdata-chi</groupId>
                 <artifactId>ts-oss-spring-boot-starter</artifactId>
                 <version>${project.version}</version>
             </dependency>
@@ -123,6 +152,18 @@
                     <artifactId>maven-javadoc-plugin</artifactId>
                     <version>3.11.2</version>
                 </plugin>
+                <!-- GPG 签名（Central 强制要求） -->
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-gpg-plugin</artifactId>
+                    <version>3.2.8</version>
+                </plugin>
+                <!-- 发布到 Maven Central（Sonatype Central Portal） -->
+                <plugin>
+                    <groupId>org.sonatype.central</groupId>
+                    <artifactId>central-publishing-maven-plugin</artifactId>
+                    <version>0.11.0</version>
+                </plugin>
             </plugins>
         </pluginManagement>
 
@@ -156,6 +197,30 @@
                     <source>21</source>
                     <doclint>none</doclint>
                     <quiet>true</quiet>
+                </configuration>
+            </plugin>
+            <!-- GPG 签名：verify 阶段对所有构件签名 -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-gpg-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>sign-artifacts</id>
+                        <phase>verify</phase>
+                        <goals>
+                            <goal>sign</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+            <!-- 发布到 Maven Central：接管 deploy 生命周期，直接上传到 Central Portal -->
+            <plugin>
+                <groupId>org.sonatype.central</groupId>
+                <artifactId>central-publishing-maven-plugin</artifactId>
+                <extensions>true</extensions>
+                <configuration>
+                    <!-- autoPublish=true：校验通过后自动发布；false（默认）：需在 Central Portal 手动点击 Publish。首次发布建议 false -->
+                    <autoPublish>false</autoPublish>
                 </configuration>
             </plugin>
         </plugins>

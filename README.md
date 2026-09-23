@@ -1,6 +1,6 @@
 # ts-oss
 
-时序数据库连接器：为主服务提供时序数据库的连接、查询、写入、删除能力，统一屏蔽底层引擎差异（TDengine / Apache IoTDB）。作为内部工具类 Maven 项目，上传到阿里云效制品仓库供主服务依赖。
+时序数据库连接器：为主服务提供时序数据库的连接、查询、写入、删除能力，统一屏蔽底层引擎差异（TDengine / Apache IoTDB）。作为开源 Maven 项目，发布到 Maven 中央仓库（Central）。
 
 - JDK 21，Spring Boot 3.3.x
 - TDengine：基于官方 `taos-jdbcdriver`（JDBC 抽象，同时支持 JNI 原生 `jdbc:TAOS://`、WebSocket `jdbc:TAOS-WS://` 与 REST `jdbc:TAOS-RS://`）
@@ -34,9 +34,9 @@ ts-oss/
 
 ```xml
 <dependency>
-    <groupId>com.bestdata.em</groupId>
+    <groupId>io.github.bestdata-chi</groupId>
     <artifactId>ts-oss-spring-boot-starter</artifactId>
-    <version>1.0.0</version>
+    <version>1.0.1</version>
 </dependency>
 ```
 
@@ -184,49 +184,53 @@ try (TimeSeriesClient client = manager.create(DatabaseType.TDENGINE, config)) {
 mvn clean install
 ```
 
-## 发布到云效制品仓库
+## 发布到 Maven Central
 
-发布走 settings.xml 里激活 profile 的 `altReleaseDeploymentRepository` / `altSnapshotDeploymentRepository` 属性，**POM 里无需 `distributionManagement`**。
+发布走 Sonatype **Central Portal**（`central.sonatype.com`），POM 里已配置 `central-publishing-maven-plugin` + `maven-gpg-plugin`，无需 `distributionManagement`。
 
-### 1. 配置 server 凭据
+### 0. 一次性准备（仅首次）
 
-在 settings.xml（全局 `$MAVEN_HOME/conf/settings.xml` 或用户级 `~/.m2/settings.xml`）里配置 `<server>`，`<id>` 需与部署仓库 id 一致（本项目为 `repo-absln`）：
+1. **注册 Central Portal**：用 GitHub 账号登录 <https://central.sonatype.com>，创建 `io.github.bestdata-chi` namespace（会靠 GitHub 自动验证所有权）。
+2. **生成 GPG 密钥**并发布到公钥服务器：
 
-```xml
-<servers>
-  <server>
-    <id>repo-absln</id>
-    <username>${云效用户名}</username>
-    <password>${云效访问令牌/AccessToken}</password>
-  </server>
-</servers>
-```
+   ```bash
+   gpg --gen-key                    # 记下 key id（8 位十六进制）
+   gpg --keyserver keyserver.ubuntu.com --send-keys <KEY_ID>
+   ```
 
-### 2. 配置部署仓库（激活 profile）
+3. **配置凭据**：在 `~/.m2/settings.xml` 里配置 Central 令牌与 GPG 签名密钥：
 
-仓库地址在云效控制台 → 制品仓库 → 获取仓库地址 复制：
+   ```xml
+   <servers>
+     <!-- Central Portal 的用户令牌：central.sonatype.com → 右上角头像 → View Account → Generate User Token -->
+     <server>
+       <id>central</id>
+       <username>${username}</username>
+       <password>${password}</password>
+     </server>
+   </servers>
 
-```xml
-<profiles>
-  <profile>
-    <id>rdc</id>
-    <properties>
-      <altReleaseDeploymentRepository>repo-absln::https://packages.aliyun.com/6178beb110204867ecfd6872/maven/repo-absln</altReleaseDeploymentRepository>
-      <altSnapshotDeploymentRepository>repo-absln::https://packages.aliyun.com/6178beb110204867ecfd6872/maven/repo-absln</altSnapshotDeploymentRepository>
-    </properties>
-  </profile>
-</profiles>
-<activeProfiles>
-  <activeProfile>rdc</activeProfile>
-</activeProfiles>
-```
+   <profiles>
+     <profile>
+       <id>gpg</id>
+       <properties>
+         <gpg.keyname>${你的 GPG KEY_ID}</gpg.keyname>
+       </properties>
+     </profile>
+   </profiles>
+   <activeProfiles>
+     <activeProfile>gpg</activeProfile>
+   </activeProfiles>
+   ```
 
-> 部署仓库的 `repo-absln` 要与第 1 步 `<server>` 的 id 一一对应。用 `id::url` 两段式写法；若写成 `id::default::url` 三段式，deploy 时会提示 legacy syntax 警告（不影响上传）。
-
-### 3. 发布
+### 1. 发布
 
 ```bash
 mvn clean deploy
 ```
 
-发布坐标：`com.bestdata.em:ts-oss-*:1.0.0`
+`central-publishing-maven-plugin`（`<extensions>true</extensions>`）会拦截 `deploy` 生命周期，把构件上传到 Central Portal（而不是默认的 maven-deploy-plugin）。`autoPublish=false` 表示校验通过后需到 Central Portal 手动点 Publish；想全自动可改为 `true`。首次发布建议先 `false`，确认无误后再改。
+
+发布坐标：`io.github.bestdata-chi:ts-oss-*:1.0.1`
+
+> 首次发布后，构件在 Central 上索引并同步到全球镜像通常需数小时到一天。
