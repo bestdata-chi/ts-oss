@@ -4,23 +4,38 @@ import com.bestdata.em.tsoss.api.DatabaseType;
 import com.bestdata.em.tsoss.api.TimeSeriesClient;
 import com.bestdata.em.tsoss.api.TimeSeriesClientFactory;
 import com.bestdata.em.tsoss.core.ConfigUtils;
+import com.zaxxer.hikari.HikariConfig;
+import com.zaxxer.hikari.HikariDataSource;
 
+import javax.sql.DataSource;
 import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.Map;
 
 /**
- * TDengine 客户端工厂，基于 JDBC 抽象，支持三种连接方式（由 URL 前缀决定）：
+ * TDengine 客户端工厂，内部使用 HikariCP 连接池（池参数固定，见下方常量），主服务无需任何连接池配置。
+ * 支持三种连接方式（由 URL 前缀决定）：
  * <ul>
  *   <li>{@code jdbc:TAOS://}   —— JNI 原生（需安装 TDengine 客户端库，连 taosd 6030 端口）</li>
  *   <li>{@code jdbc:TAOS-WS://}—— WebSocket（连 taosAdapter 6041 端口，无需客户端库）</li>
  *   <li>{@code jdbc:TAOS-RS://}—— REST（连 taosAdapter 6041 端口）</li>
  * </ul>
- * URL 透传给 {@link DriverManager}，驱动按前缀自动选择，无需手动 Class.forName。
  */
 public class TdengineClientFactory implements TimeSeriesClientFactory {
+
+    /** 连接池最大连接数。 */
+    private static final int POOL_MAX_SIZE = 10;
+    /** 从池中获取连接的最长等待时间（毫秒）。 */
+    private static final long CONNECTION_TIMEOUT_MS = 5000L;
+    /** 连接空闲回收时间（毫秒）。 */
+    private static final long IDLE_TIMEOUT_MS = 600_000L;
+    /** 连接最大存活时间（毫秒），应小于服务端/NAT 的空闲超时。 */
+    private static final long MAX_LIFETIME_MS = 1_800_000L;
+    /** 空闲连接保活探测间隔（毫秒），防止被 NAT/防火墙踢掉。 */
+    private static final long KEEPALIVE_TIME_MS = 300_000L;
+    /** 借出连接前的校验 SQL。 */
+    private static final String CONNECTION_TEST_QUERY = "SELECT SERVER_VERSION()";
 
     /**
      * 若指定了 database，则替换 URL 中的数据库段（your_db → 实际库名），满足「数据库动态」。
@@ -74,7 +89,7 @@ public class TdengineClientFactory implements TimeSeriesClientFactory {
 
     /**
      * 创建并返回一个新的 TDengine 客户端实例。
-     * 从配置中获取必要的连接参数，建立连接后确保超级表 {@code <database>DataSTable} 存在。
+     * 从配置中获取必要的连接参数，建立连接池后确保超级表 {@code <database>DataSTable} 存在。
      *
      * @param config 包含数据库连接配置的 Map，必须包含 "url" 和 "database"（或 URL 中带数据库段），
      *               可选包含 "username"、"password"
@@ -101,20 +116,59 @@ public class TdengineClientFactory implements TimeSeriesClientFactory {
         String superTableName = database + "DataSTable";
 
         String jdbcUrl = resolveDatabase(url, database);
+        String resolvedUsername = username == null ? "root" : username;
+        String resolvedPassword = password == null ? "taosdata" : password;
+
+        HikariDataSource dataSource = null;
         try {
-            Connection connection = DriverManager.getConnection(
-                    jdbcUrl,
-                    username == null ? "root" : username,
-                    password == null ? "taosdata" : password);
-            // 在连接数据库的同时确保超级表存在：ts/v 为列，sensorId/deviceId 为 tag
-            try (Statement st = connection.createStatement()) {
-                //noinspection SqlNoDataSourceInspection
-                String sql = "CREATE STABLE IF NOT EXISTS `" + superTableName + "` (ts TIMESTAMP, v FLOAT) TAGS (`sensorId` NCHAR(64), `deviceId` NCHAR(64))";
-                st.execute(sql);
-            }
-            return new TdengineClient(connection, superTableName);
+            dataSource = buildDataSource(jdbcUrl, resolvedUsername, resolvedPassword);
+            // 建池后确保超级表存在：ts/v 为列，sensorId/deviceId 为 tag
+            ensureSuperTable(dataSource, superTableName);
+            return new TdengineClient(dataSource, superTableName);
         } catch (SQLException e) {
+            if (dataSource != null) {
+                dataSource.close();
+            }
             throw new IllegalStateException("TDengine 连接失败: " + jdbcUrl + "，原因: " + e.getMessage(), e);
         }
+    }
+
+    private HikariDataSource buildDataSource(String jdbcUrl, String username, String password) {
+        HikariConfig config = new HikariConfig();
+        config.setJdbcUrl(jdbcUrl);
+        config.setUsername(username);
+        config.setPassword(password);
+        config.setDriverClassName(resolveDriverClass(jdbcUrl));
+        config.setMaximumPoolSize(POOL_MAX_SIZE);
+        config.setConnectionTimeout(CONNECTION_TIMEOUT_MS);
+        config.setIdleTimeout(IDLE_TIMEOUT_MS);
+        config.setMaxLifetime(MAX_LIFETIME_MS);
+        config.setKeepaliveTime(KEEPALIVE_TIME_MS);
+        config.setConnectionTestQuery(CONNECTION_TEST_QUERY);
+        config.setPoolName("ts-oss-tdengine");
+        return new HikariDataSource(config);
+    }
+
+    private void ensureSuperTable(DataSource dataSource, String superTableName) throws SQLException {
+        try (Connection connection = dataSource.getConnection();
+             Statement st = connection.createStatement()) {
+            //noinspection SqlNoDataSourceInspection
+            st.execute("CREATE STABLE IF NOT EXISTS `" + superTableName
+                    + "` (ts TIMESTAMP, v FLOAT) TAGS (`sensorId` NCHAR(64), `deviceId` NCHAR(64))");
+        }
+    }
+
+    /**
+     * 根据 URL 前缀选择对应的驱动类。taos-jdbcdriver 按连接方式提供三个驱动实现。
+     */
+    private static String resolveDriverClass(String url) {
+        String lower = url.toLowerCase();
+        if (lower.startsWith("jdbc:taos-ws:")) {
+            return "com.taosdata.jdbc.ws.WebSocketDriver";
+        }
+        if (lower.startsWith("jdbc:taos-rs:")) {
+            return "com.taosdata.jdbc.rs.RestfulDriver";
+        }
+        return "com.taosdata.jdbc.TSDBDriver";
     }
 }

@@ -6,6 +6,7 @@ import com.bestdata.em.tsoss.api.TimeSeriesClient;
 import com.bestdata.em.tsoss.core.CommonUtils;
 import com.bestdata.em.tsoss.core.ConfigUtils;
 
+import javax.sql.DataSource;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -20,22 +21,27 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * TDengine 连接句柄，包装 JDBC {@link Connection}。
+ * TDengine 连接句柄，基于连接池（HikariCP）按次借还 JDBC {@link Connection}。
+ *
+ * <p>每次操作从池中借用连接、用完即还，因此多线程并发读写天然安全；断线检测与重建由连接池
+ * 在借出时完成，业务方无需关注连接状态。</p>
  */
 public class TdengineClient implements TimeSeriesClient, AutoCloseable {
 
-    private final Connection connection;
+    private final DataSource dataSource;
     private final String superTableName;
 
-    TdengineClient(Connection connection, String superTableName) {
-        this.connection = connection;
+    TdengineClient(DataSource dataSource, String superTableName) {
+        this.dataSource = dataSource;
         this.superTableName = superTableName;
     }
 
     @Override
     public boolean isConnected() {
-        try {
-            return !connection.isClosed();
+        try (Connection connection = dataSource.getConnection();
+             Statement st = connection.createStatement();
+             ResultSet rs = st.executeQuery("SELECT SERVER_VERSION()")) {
+            return rs.next();
         } catch (SQLException e) {
             return false;
         }
@@ -52,16 +58,15 @@ public class TdengineClient implements TimeSeriesClient, AutoCloseable {
         String sql;
         if (bySensor) {
             // 精确查询：deviceId + sensorId 双 tag 过滤
-            // noinspection SqlNoDataSourceInspection
             sql = "SELECT ts, v FROM " + CommonUtils.quote(superTableName)
                     + " WHERE `sensorId` = ? AND `deviceId` = ? AND ts >= ? AND ts <= ? ORDER BY ts DESC";
         } else {
             // 仅按 deviceId 查询设备下全部传感器数据，带出 sensorId 以区分不同传感器
-            // noinspection SqlNoDataSourceInspection
             sql = "SELECT `sensorId`, ts, v FROM " + CommonUtils.quote(superTableName)
                     + " WHERE `deviceId` = ? AND ts >= ? AND ts <= ? ORDER BY ts DESC";
         }
-        try (PreparedStatement ps = connection.prepareStatement(sql)) {
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement ps = connection.prepareStatement(sql)) {
             if (bySensor) {
                 ps.setString(1, sensorId);
                 ps.setString(2, deviceId);
@@ -100,10 +105,10 @@ public class TdengineClient implements TimeSeriesClient, AutoCloseable {
         }
 
         String placeholders = String.join(",", Collections.nCopies(tableNames.size(), "?"));
-        // noinspection SqlNoDataSourceInspection
         String sql = "SELECT `sensorId`, `deviceId`, ts, v FROM " + CommonUtils.quote(superTableName)
                 + " WHERE tbname IN (" + placeholders + ") AND ts >= ? AND ts <= ? ORDER BY ts DESC";
-        try (PreparedStatement ps = connection.prepareStatement(sql)) {
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement ps = connection.prepareStatement(sql)) {
             int idx = 1;
             for (String tableName : tableNames) {
                 ps.setString(idx++, tableName);
@@ -127,8 +132,9 @@ public class TdengineClient implements TimeSeriesClient, AutoCloseable {
     public List<Map<String, Object>> query(String sql) {
 
         CommonUtils.requireNotBlank(sql, "sql");
-        try (PreparedStatement ps = connection.prepareStatement(sql);
-                ResultSet rs = ps.executeQuery()) {
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement ps = connection.prepareStatement(sql);
+             ResultSet rs = ps.executeQuery()) {
             ResultSetMetaData meta = rs.getMetaData();
             int columnCount = meta.getColumnCount();
             List<Map<String, Object>> result = new ArrayList<>();
@@ -148,7 +154,8 @@ public class TdengineClient implements TimeSeriesClient, AutoCloseable {
     @Override
     public void voidQuery(String sql) {
         CommonUtils.requireNotBlank(sql, "sql");
-        try (Statement st = connection.createStatement()) {
+        try (Connection connection = dataSource.getConnection();
+             Statement st = connection.createStatement()) {
             st.execute(sql);
         } catch (SQLException e) {
             throw new IllegalStateException("TDengine 查询失败: " + sql, e);
@@ -173,7 +180,7 @@ public class TdengineClient implements TimeSeriesClient, AutoCloseable {
 
     /**
      * 数据封装 - 多输出值查询
-     * 
+     *
      * @author ZhenYu Chi
      * @date 2026/8/25 09:07
      */
@@ -202,21 +209,22 @@ public class TdengineClient implements TimeSeriesClient, AutoCloseable {
             throw new IllegalArgumentException("limit 必须大于 0");
         }
 
-        long total = count(deviceId, sensorId, startTime, endTime);
-        if (total == 0) {
-            return new PageResult<>(Collections.emptyList(), 0L, page, limit);
-        }
+        try (Connection connection = dataSource.getConnection()) {
+            long total = count(connection, deviceId, sensorId, startTime, endTime);
+            if (total == 0) {
+                return new PageResult<>(Collections.emptyList(), 0L, page, limit);
+            }
 
-        int offset = (page - 1) * limit;
-        // noinspection SqlNoDataSourceInspection
-        String sql = "SELECT ts, v FROM " + CommonUtils.quote(superTableName)
-                + " WHERE `deviceId` = ? AND `sensorId` = ? AND ts >= ? AND ts <= ? ORDER BY ts DESC LIMIT " + limit + " OFFSET " + offset;
-        try (PreparedStatement ps = connection.prepareStatement(sql)) {
-            ps.setString(1, deviceId);
-            ps.setString(2, sensorId);
-            ps.setTimestamp(3, new Timestamp(startTime));
-            ps.setTimestamp(4, new Timestamp(endTime));
-            return new PageResult<>(getDataPoints(ps, sensorId), total, page, limit);
+            int offset = (page - 1) * limit;
+            String sql = "SELECT ts, v FROM " + CommonUtils.quote(superTableName)
+                    + " WHERE `deviceId` = ? AND `sensorId` = ? AND ts >= ? AND ts <= ? ORDER BY ts DESC LIMIT " + limit + " OFFSET " + offset;
+            try (PreparedStatement ps = connection.prepareStatement(sql)) {
+                ps.setString(1, deviceId);
+                ps.setString(2, sensorId);
+                ps.setTimestamp(3, new Timestamp(startTime));
+                ps.setTimestamp(4, new Timestamp(endTime));
+                return new PageResult<>(getDataPoints(ps, sensorId), total, page, limit);
+            }
         } catch (SQLException e) {
             throw new IllegalStateException("TDengine 分页查询失败: " + sensorId, e);
         }
@@ -228,10 +236,10 @@ public class TdengineClient implements TimeSeriesClient, AutoCloseable {
         boolean bySensor = sensorId != null && !sensorId.isBlank();
         if (bySensor) {
             // 精确查询：deviceId + sensorId 双 tag 过滤，时间倒序取首条
-            // noinspection SqlNoDataSourceInspection
             String sql = "SELECT ts, v FROM " + CommonUtils.quote(superTableName)
                     + " WHERE `sensorId` = ? AND `deviceId` = ? ORDER BY ts DESC LIMIT 1";
-            try (PreparedStatement ps = connection.prepareStatement(sql)) {
+            try (Connection connection = dataSource.getConnection();
+                 PreparedStatement ps = connection.prepareStatement(sql)) {
                 ps.setString(1, sensorId);
                 ps.setString(2, deviceId);
                 try (ResultSet rs = ps.executeQuery()) {
@@ -247,10 +255,10 @@ public class TdengineClient implements TimeSeriesClient, AutoCloseable {
             }
         }
         // 仅按 deviceId 查询设备下所有传感点的最新数据：last_row 取各子表最新一行，GROUP BY tbname 逐子表返回
-        // noinspection SqlNoDataSourceInspection
         String sql = "SELECT last_row(ts), last_row(v), `sensorId` FROM " + CommonUtils.quote(superTableName)
                 + " WHERE `deviceId` = ? GROUP BY tbname";
-        try (PreparedStatement ps = connection.prepareStatement(sql)) {
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement ps = connection.prepareStatement(sql)) {
             ps.setString(1, deviceId);
             try (ResultSet rs = ps.executeQuery()) {
                 List<DataPoint> result = new ArrayList<>();
@@ -270,8 +278,7 @@ public class TdengineClient implements TimeSeriesClient, AutoCloseable {
     /**
      * 统计 deviceId 下 sensorId 在 [startTime, endTime] 内的数据点总数。
      */
-    private long count(String deviceId, String sensorId, long startTime, long endTime) {
-        // noinspection SqlNoDataSourceInspection
+    private long count(Connection connection, String deviceId, String sensorId, long startTime, long endTime) throws SQLException {
         String sql = "SELECT COUNT(*) FROM " + CommonUtils.quote(superTableName)
                 + " WHERE `deviceId` = ? AND `sensorId` = ? AND ts >= ? AND ts <= ?";
         try (PreparedStatement ps = connection.prepareStatement(sql)) {
@@ -282,8 +289,6 @@ public class TdengineClient implements TimeSeriesClient, AutoCloseable {
             try (ResultSet rs = ps.executeQuery()) {
                 return rs.next() ? rs.getLong(1) : 0L;
             }
-        } catch (SQLException e) {
-            throw new IllegalStateException("TDengine 分页统计失败: " + sensorId, e);
         }
     }
 
@@ -296,12 +301,12 @@ public class TdengineClient implements TimeSeriesClient, AutoCloseable {
         CommonUtils.requireNotBlank(deviceId, "deviceId");
 
         // 单条写入用内联文本只需一次往返，能显著降低单点写入延迟。
-        // noinspection SqlNoDataSourceInspection
         String sql = "INSERT INTO " + quoteSubTable(deviceId + "_" + sensorId)
                 + " USING " + CommonUtils.quote(superTableName)
                 + " TAGS ('" + sensorId + "', '" + deviceId + "')"
                 + " VALUES (" + dataPoint.getTm() + ", " + dataPoint.getValue() + ")";
-        try (Statement st = connection.createStatement()) {
+        try (Connection connection = dataSource.getConnection();
+             Statement st = connection.createStatement()) {
             st.executeUpdate(sql);
         } catch (SQLException e) {
             throw new IllegalStateException("TDengine 写入数据点失败: " + sensorId, e);
@@ -321,7 +326,8 @@ public class TdengineClient implements TimeSeriesClient, AutoCloseable {
             CommonUtils.requireNotBlank(sid, "sid");
             bySid.computeIfAbsent(sid, k -> new ArrayList<>()).add(dataPoint);
         }
-        try (Statement st = connection.createStatement()) {
+        try (Connection connection = dataSource.getConnection();
+             Statement st = connection.createStatement()) {
             for (Map.Entry<String, List<DataPoint>> entry : bySid.entrySet()) {
                 String sensorId = entry.getKey();
                 List<DataPoint> points = entry.getValue();
@@ -362,7 +368,8 @@ public class TdengineClient implements TimeSeriesClient, AutoCloseable {
             sql = "DELETE FROM " + CommonUtils.quote(superTableName)
                     + " WHERE `deviceId` = ? AND ts >= ? AND ts <= ?";
         }
-        try (PreparedStatement ps = connection.prepareStatement(sql)) {
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement ps = connection.prepareStatement(sql)) {
             if (bySensor) {
                 ps.setString(1, sensorId);
                 ps.setString(2, deviceId);
@@ -384,7 +391,8 @@ public class TdengineClient implements TimeSeriesClient, AutoCloseable {
         if (deleteList == null || deleteList.isEmpty()) {
             return;
         }
-        try (Statement stmt = connection.createStatement()) {
+        try (Connection connection = dataSource.getConnection();
+             Statement stmt = connection.createStatement()) {
             for (Map<String, Object> item : deleteList) {
                 String deviceId = ConfigUtils.getString(item, "deviceId");
                 CommonUtils.requireNotBlank(deviceId, "deviceId");
@@ -413,16 +421,18 @@ public class TdengineClient implements TimeSeriesClient, AutoCloseable {
 
     @Override
     public void close() {
-        try {
-            connection.close();
-        } catch (SQLException e) {
-            throw new IllegalStateException("关闭 TDengine 连接失败", e);
+        if (dataSource instanceof AutoCloseable) {
+            try {
+                ((AutoCloseable) dataSource).close();
+            } catch (Exception e) {
+                throw new IllegalStateException("关闭 TDengine 连接池失败", e);
+            }
         }
     }
 
     /**
      * 对子表标识符进行 SQL 转义，添加反引号。
-     * 
+     *
      * @param identifier 子表标识符
      * @return
      */
