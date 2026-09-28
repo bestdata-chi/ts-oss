@@ -5,10 +5,9 @@
     <modelVersion>4.0.0</modelVersion>
 
     <parent>
-        <groupId>com.bestdata.em</groupId>
+        <groupId>io.github.bestdata-chi</groupId>
         <artifactId>ts-oss-parent</artifactId>
-        <!--        <version>1.0.0-SNAPSHOT</version>-->
-        <version>1.0.7</version>
+        <version>${revision}</version>
     </parent>
 
     <artifactId>ts-oss-iotdb</artifactId>
@@ -17,7 +16,7 @@
 
     <dependencies>
         <dependency>
-            <groupId>com.bestdata.em</groupId>
+            <groupId>io.github.bestdata-chi</groupId>
             <artifactId>ts-oss-core</artifactId>
         </dependency>
         <!-- IoTDB 原生会话，版本由父 POM 统一管理 -->
