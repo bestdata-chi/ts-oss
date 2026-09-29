@@ -408,7 +408,7 @@ public class TdengineClient implements TimeSeriesClient, AutoCloseable {
                 long sTm = ConfigUtils.getLong(item, 0L, "sTm");
                 long eTm = ConfigUtils.getLong(item, 0L, "eTm");
                 if (sTm > eTm) {
-                    throw new IllegalArgumentException("sTm 不能大于 eTm");
+                    throw new IllegalArgumentException("sTm 不能大于 eTm!");
                 }
                 StringBuilder deleteSql = new StringBuilder("DELETE FROM ").append(CommonUtils.quote(superTableName));
                 if (bySensor) {
