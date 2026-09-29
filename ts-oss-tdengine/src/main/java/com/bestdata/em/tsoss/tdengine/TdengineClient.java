@@ -354,7 +354,7 @@ public class TdengineClient implements TimeSeriesClient, AutoCloseable {
             }
             st.executeBatch();
         } catch (SQLException e) {
-            throw new IllegalStateException("TDengine 批量写入数据点失败", e);
+            throw new IllegalStateException("TDengine 批量写入数据点失败!", e);
         }
     }
 
