@@ -20,6 +20,9 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 /**
  * TDengine 连接句柄，基于连接池（HikariCP）按次借还 JDBC {@link Connection}。
  *
@@ -29,6 +32,8 @@ import java.util.Map;
  * </p>
  */
 public class TdengineClient implements TimeSeriesClient, AutoCloseable {
+
+    private static final Logger log = LoggerFactory.getLogger(TdengineClient.class);
 
     private final DataSource dataSource;
     private final String superTableName;
@@ -324,35 +329,40 @@ public class TdengineClient implements TimeSeriesClient, AutoCloseable {
         if (dataPoints == null || dataPoints.isEmpty()) {
             return;
         }
-        // 每个数据点自带 sid，按 sid 分组后每组合并成一条多 VALUES 的 INSERT，再一次性提交
-        Map<String, List<DataPoint>> bySid = new LinkedHashMap<>();
+        // 每个数据点自带 sid 与 deviceId，按 (deviceId, sid) 分组后每组合并成一条多 VALUES 的 INSERT，再一次性提交
+        Map<String, List<DataPoint>> byDeviceAndSid = new LinkedHashMap<>();
         for (DataPoint dataPoint : dataPoints) {
             CommonUtils.requireDataPoint(dataPoint);
             String sid = dataPoint.getSid();
             CommonUtils.requireNotBlank(sid, "sid");
-            bySid.computeIfAbsent(sid, k -> new ArrayList<>()).add(dataPoint);
+            String deviceId = dataPoint.getDeviceId();
+            CommonUtils.requireNotBlank(deviceId, "deviceId");
+            byDeviceAndSid.computeIfAbsent(deviceId + "_" + sid, k -> new ArrayList<>()).add(dataPoint);
         }
         try (Connection connection = dataSource.getConnection();
                 Statement st = connection.createStatement()) {
-            for (Map.Entry<String, List<DataPoint>> entry : bySid.entrySet()) {
-                String sensorId = entry.getKey();
-                List<DataPoint> points = entry.getValue();
+            StringBuilder sql = new StringBuilder();
+            for (List<DataPoint> points : byDeviceAndSid.values()) {
                 String deviceId = points.get(0).getDeviceId();
-                CommonUtils.requireNotBlank(deviceId, "deviceId");
-                StringBuilder sql = new StringBuilder("INSERT INTO ")
-                        .append(quoteSubTable(deviceId + "_" + sensorId)).append(" USING ")
+                String sensorId = points.get(0).getSid();
+                if (sql.length() == 0) {
+                    sql.append("INSERT INTO ");
+                } else {
+                    sql.append(' ');
+                }
+                sql.append(quoteSubTable(deviceId + "_" + sensorId)).append(" USING ")
                         .append(CommonUtils.quote(superTableName))
                         .append(" TAGS ('").append(sensorId).append("', '").append(deviceId).append("') VALUES ");
                 for (int i = 0; i < points.size(); i++) {
                     DataPoint dataPoint = points.get(i);
                     if (i > 0) {
-                        sql.append(' ');
+                        sql.append(", ");
                     }
                     sql.append('(').append(dataPoint.getTm()).append(", ").append(dataPoint.getValue()).append(')');
                 }
-                st.addBatch(sql.toString());
             }
-            st.executeBatch();
+            log.info("TDengine 批量写入数据点: {}", sql);
+            st.executeUpdate(sql.toString());
         } catch (SQLException e) {
             throw new IllegalStateException("TDengine 批量写入数据点失败!", e);
         }
