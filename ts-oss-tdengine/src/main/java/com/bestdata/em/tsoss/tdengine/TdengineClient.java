@@ -16,9 +16,14 @@ import java.sql.Statement;
 import java.sql.Timestamp;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
+import java.util.regex.Pattern;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -34,6 +39,18 @@ import org.slf4j.LoggerFactory;
 public class TdengineClient implements TimeSeriesClient, AutoCloseable {
 
     private static final Logger log = LoggerFactory.getLogger(TdengineClient.class);
+
+    /** 支持的聚合方式，作为白名单校验后再拼入 SQL，避免注入。 */
+    private static final Set<String> AGGREGATION_WAYS = Set.of("avg", "max", "min", "first", "last");
+
+    /** 窗口格式：正整数 + 单位（s/m/h/d），如 1m、10m、6h、1d。 */
+    private static final Pattern WINDOW_PATTERN = Pattern.compile("^[1-9]\\d*[smhd]$");
+
+    /**
+     * 单条 SQL 中 tbname IN 列表的最大长度。子表过多时分批查询后再合并，
+     * 避免 SQL 过长以及引擎对 IN 列表/参数个数的限制。
+     */
+    private static final int TBNAME_IN_BATCH_SIZE = 50;
 
     private final DataSource dataSource;
     private final String superTableName;
@@ -99,18 +116,8 @@ public class TdengineClient implements TimeSeriesClient, AutoCloseable {
             throw new IllegalArgumentException("startTime 不能大于 endTime");
         }
         // 每个 (deviceId, sensorId) 对应唯一子表 s_<deviceId>_<sensorId>，用 tbname IN
-        // 一次往返精确命中全部子表
-        List<String> tableNames = new ArrayList<>();
-        for (DataPoint dataPoint : dataPoints) {
-            if (dataPoint == null) {
-                throw new IllegalArgumentException("dataPoints 中存在空元素");
-            }
-            String deviceId = dataPoint.getDeviceId();
-            CommonUtils.requireNotBlank(deviceId, "deviceId");
-            String sensorId = dataPoint.getSid();
-            CommonUtils.requireNotBlank(sensorId, "sensorId");
-            tableNames.add("s_" + deviceId + "_" + sensorId);
-        }
+        // 一次往返精确命中全部子表（去重避免重复扫描）
+        List<String> tableNames = collectTableNames(dataPoints);
 
         String placeholders = String.join(",", Collections.nCopies(tableNames.size(), "?"));
         String sql = "SELECT `sensorId`, `deviceId`, ts, v FROM " + CommonUtils.quote(superTableName)
@@ -134,6 +141,95 @@ public class TdengineClient implements TimeSeriesClient, AutoCloseable {
         } catch (SQLException e) {
             throw new IllegalStateException("TDengine 批量查询失败", e);
         }
+    }
+
+    @Override
+    public List<DataPoint> queryAggregation(List<DataPoint> dataPoints, long startTime, long endTime, String window,
+            String way) {
+        if (dataPoints == null || dataPoints.isEmpty()) {
+            throw new IllegalArgumentException("dataPoints 不能为空");
+        }
+        if (startTime > endTime) {
+            throw new IllegalArgumentException("startTime 不能大于 endTime");
+        }
+        if (window == null || !WINDOW_PATTERN.matcher(window).matches()) {
+            throw new IllegalArgumentException(
+                    "window 格式非法，应为 \"1m\"、\"10m\"、\"30m\"、\"1h\"、\"6h\"、\"12h\"、\"1d\" 等: " + window);
+        }
+        String aggregation = way == null ? null : way.toLowerCase(Locale.ROOT);
+        if (aggregation == null || !AGGREGATION_WAYS.contains(aggregation)) {
+            throw new IllegalArgumentException("way 仅支持 avg、max、min、first、last: " + way);
+        }
+
+        // 同一 (deviceId, sensorId) 对应唯一子表，去重后按批查询，避免 IN 列表过长
+        List<String> tableNames = collectTableNames(dataPoints);
+
+        // 窗口对齐与批次划分无关（按 epoch 对齐），分批聚合与单条查询结果一致；
+        // 全程复用同一连接，仅按批增加往返次数
+        try (Connection connection = dataSource.getConnection()) {
+            List<DataPoint> result = new ArrayList<>();
+            for (int from = 0; from < tableNames.size(); from += TBNAME_IN_BATCH_SIZE) {
+                List<String> batch = tableNames.subList(from,
+                        Math.min(from + TBNAME_IN_BATCH_SIZE, tableNames.size()));
+                result.addAll(queryAggregationBatch(connection, batch, startTime, endTime, window, aggregation));
+            }
+            // 与其它查询保持一致，按时间倒序返回
+            result.sort(Comparator.comparingLong(DataPoint::getTm).reversed());
+            return result;
+        } catch (SQLException e) {
+            throw new IllegalStateException("TDengine 聚合查询失败", e);
+        }
+    }
+
+    /**
+     * 对单批子表执行窗口聚合。PARTITION BY tbname 保证各传感点独立开窗，_wend 即窗口结束时间，
+     * 作为聚合结果的时间戳返回（window/aggregation 均已白名单校验）。
+     */
+    private List<DataPoint> queryAggregationBatch(Connection connection, List<String> tableNames, long startTime,
+            long endTime, String window, String aggregation) throws SQLException {
+        String placeholders = String.join(",", Collections.nCopies(tableNames.size(), "?"));
+        String sql = "SELECT `sensorId`, `deviceId`, _wend, " + aggregation + "(v) AS v FROM "
+                + CommonUtils.quote(superTableName)
+                + " WHERE tbname IN (" + placeholders + ") AND ts >= ? AND ts <= ?"
+                + " PARTITION BY tbname INTERVAL(" + window + ")";
+        try (PreparedStatement ps = connection.prepareStatement(sql)) {
+            int idx = 1;
+            for (String tableName : tableNames) {
+                ps.setString(idx++, tableName);
+            }
+            ps.setTimestamp(idx++, new Timestamp(startTime));
+            ps.setTimestamp(idx, new Timestamp(endTime));
+            try (ResultSet rs = ps.executeQuery()) {
+                List<DataPoint> result = new ArrayList<>();
+                while (rs.next()) {
+                    Timestamp windowEnd = rs.getTimestamp("_wend");
+                    if (windowEnd == null) {
+                        continue;
+                    }
+                    result.add(new DataPoint(rs.getString("sensorId"), rs.getString("deviceId"),
+                            windowEnd.getTime(), rs.getFloat("v")));
+                }
+                return result;
+            }
+        }
+    }
+
+    /**
+     * 校验每个数据点的 deviceId/sensorId，并收集去重后的子表名，保持首次出现的顺序。
+     */
+    private static List<String> collectTableNames(List<DataPoint> dataPoints) {
+        Set<String> tableNames = new LinkedHashSet<>();
+        for (DataPoint dataPoint : dataPoints) {
+            if (dataPoint == null) {
+                throw new IllegalArgumentException("dataPoints 中存在空元素");
+            }
+            String deviceId = dataPoint.getDeviceId();
+            String sensorId = dataPoint.getSid();
+            CommonUtils.requireNotBlank(deviceId, "deviceId");
+            CommonUtils.requireNotBlank(sensorId, "sensorId");
+            tableNames.add("s_" + deviceId + "_" + sensorId);
+        }
+        return new ArrayList<>(tableNames);
     }
 
     @Override

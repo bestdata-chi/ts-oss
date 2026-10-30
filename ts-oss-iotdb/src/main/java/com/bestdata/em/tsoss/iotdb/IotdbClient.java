@@ -37,6 +37,13 @@ public class IotdbClient implements TimeSeriesClient, AutoCloseable {
     }
 
     @Override
+    public List<DataPoint> queryAggregation(List<DataPoint> dataPoints, long startTime, long endTime, String window,
+            String way) {
+        // IoTDB 实现暂未启用（模块未纳入聚合构建），仅保留接口桩
+        return null;
+    }
+
+    @Override
     public List<Map<String, Object>> query(String sql) {
         return null;
     }
