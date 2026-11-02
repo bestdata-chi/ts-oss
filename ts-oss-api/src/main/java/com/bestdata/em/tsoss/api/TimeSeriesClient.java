@@ -47,31 +47,36 @@ public interface TimeSeriesClient {
     List<DataPoint> queryRealTime(String deviceId, String sensorId);
 
     /**
-     * 查询多组传感点在 [startTime, endTime]（epoch 毫秒，闭区间）内按时间窗口聚合后的数据。
-     *
-     * <p>
-     * {@code dataPoints} 中每个元素只需提供 {@code deviceId} 与 {@code sid}，可包含多组
-     * deviceId/sensorId 组合；返回结果按 (deviceId, sensorId) 各自独立开窗聚合，
-     * 每个窗口返回一个数据点，其 {@code tm} 为窗口的结束时间。
-     * </p>
-     *
-     * @param dataPoints 待聚合的传感点列表（每个元素需提供 deviceId 与 sid）
-     * @param startTime  起始时间（毫秒）
-     * @param endTime    结束时间（毫秒）
-     * @param window     时间窗口，格式为 "1m"、"10m"、"30m"、"1h"、"6h"、"12h"、"1d"
-     * @param way        聚合方式，可选：avg, max, min, first, last
-     * @return 按时间倒序的聚合数据点列表（时间为窗口结束时间），无数据返回空列表
-     */
-    List<DataPoint> queryAggregation(List<DataPoint> dataPoints, long startTime, long endTime, String window,
-            String way);
-
-    /**
      * 执行自定义 SQL 查询，返回原始行数据（列名 → 值），不做 DataPoint 解析。
      *
      * @author ZhenYu Chi
      * @date 2026/8/24 15:07
      */
     List<Map<String, Object>> query(String sql);
+
+    /**
+     * 查询多组传感点在 [startTime, endTime]（epoch 毫秒，闭区间）内按时间窗口聚合后的数据。
+     *
+     * <p>
+     * {@code dataPoints} 中每个元素只需提供 {@code deviceId} 与 {@code sid}，可包含多组
+     * deviceId/sensorId 组合；返回结果按 (deviceId, sensorId) 各自独立开窗聚合，
+     * 每个窗口返回一个数据点。其 {@code tm} 的含义随 {@code way} 而定：
+     * </p>
+     * <ul>
+     * <li>{@code avg}：窗口结束时间（均值不对应单条记录）；</li>
+     * <li>{@code first} / {@code last}：窗口内首条、末条记录的真实时间；</li>
+     * <li>{@code max} / {@code min}：极值所在记录的真实时间；底层引擎不支持时回退为窗口开始时间。</li>
+     * </ul>
+     *
+     * @param dataPoints 待聚合的传感点列表（每个元素需提供 deviceId 与 sid）
+     * @param startTime  起始时间（毫秒）
+     * @param endTime    结束时间（毫秒）
+     * @param window     时间窗口，格式为 "1m"、"10m"、"30m"、"1h"、"6h"、"12h"、"1d"
+     * @param way        聚合方式，可选：avg, max, min, first, last
+     * @return 按时间倒序的聚合数据点列表，时间为窗口边界或聚合结果对应记录的时间，无数据返回空列表
+     */
+    List<DataPoint> queryAggregation(List<DataPoint> dataPoints, long startTime, long endTime, String window,
+                                     String way);
 
     /**
      * 执行自定义 SQL 查询，不返回结果。

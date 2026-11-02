@@ -2,6 +2,8 @@ package com.bestdata.em.tsoss.api;
 
 import lombok.Getter;
 
+import java.util.Date;
+
 /**
  * 时序数据点：一个时间戳 + 一个测值。
  */
@@ -38,6 +40,13 @@ public final class DataPoint {
     public DataPoint(long timestamp, float value) {
         this.tm = timestamp;
         this.value = value;
+    }
+
+    public DataPoint(String sensorId, String deviceId) {
+        this.tm = new Date().getTime();
+        this.value = 0;
+        this.sid = sensorId;
+        this.deviceId = deviceId;
     }
 
     @Override

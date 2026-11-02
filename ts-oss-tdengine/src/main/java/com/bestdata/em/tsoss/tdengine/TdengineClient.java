@@ -25,6 +25,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.regex.Pattern;
 
+import com.bestdata.em.tsoss.tdengine.utils.TdengineUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -54,6 +55,12 @@ public class TdengineClient implements TimeSeriesClient, AutoCloseable {
 
     private final DataSource dataSource;
     private final String superTableName;
+
+    /**
+     * 服务端是否支持 COLS 函数，null 表示尚未获取。获取成功后缓存；获取本身失败（如取连接异常）
+     * 不写缓存，留待下次重试。
+     */
+    private volatile Boolean colsSupported;
 
     TdengineClient(DataSource dataSource, String superTableName) {
         this.dataSource = dataSource;
@@ -96,12 +103,12 @@ public class TdengineClient implements TimeSeriesClient, AutoCloseable {
                 ps.setString(2, deviceId);
                 ps.setTimestamp(3, new Timestamp(startTime));
                 ps.setTimestamp(4, new Timestamp(endTime));
-                return getDataPoints(ps, sensorId);
+                return TdengineUtil.getDataPoints(ps, sensorId);
             }
             ps.setString(1, deviceId);
             ps.setTimestamp(2, new Timestamp(startTime));
             ps.setTimestamp(3, new Timestamp(endTime));
-            return getDataPoints(ps);
+            return TdengineUtil.getDataPoints(ps);
         } catch (SQLException e) {
             throw new IllegalStateException("TDengine 查询失败: " + (bySensor ? sensorId : deviceId), e);
         }
@@ -117,7 +124,7 @@ public class TdengineClient implements TimeSeriesClient, AutoCloseable {
         }
         // 每个 (deviceId, sensorId) 对应唯一子表 s_<deviceId>_<sensorId>，用 tbname IN
         // 一次往返精确命中全部子表（去重避免重复扫描）
-        List<String> tableNames = collectTableNames(dataPoints);
+        List<String> tableNames = TdengineUtil.collectTableNames(dataPoints);
 
         String placeholders = String.join(",", Collections.nCopies(tableNames.size(), "?"));
         String sql = "SELECT `sensorId`, `deviceId`, ts, v FROM " + CommonUtils.quote(superTableName)
@@ -162,7 +169,7 @@ public class TdengineClient implements TimeSeriesClient, AutoCloseable {
         }
 
         // 同一 (deviceId, sensorId) 对应唯一子表，去重后按批查询，避免 IN 列表过长
-        List<String> tableNames = collectTableNames(dataPoints);
+        List<String> tableNames = TdengineUtil.collectTableNames(dataPoints);
 
         // 窗口对齐与批次划分无关（按 epoch 对齐），分批聚合与单条查询结果一致；
         // 全程复用同一连接，仅按批增加往返次数
@@ -182,14 +189,33 @@ public class TdengineClient implements TimeSeriesClient, AutoCloseable {
     }
 
     /**
-     * 对单批子表执行窗口聚合。PARTITION BY tbname 保证各传感点独立开窗，_wend 即窗口结束时间，
-     * 作为聚合结果的时间戳返回（window/aggregation 均已白名单校验）。
+     * 对单批子表执行窗口聚合。PARTITION BY tbname 保证各传感点独立开窗，结果点的时间列由
      */
     private List<DataPoint> queryAggregationBatch(Connection connection, List<String> tableNames, long startTime,
             long endTime, String window, String aggregation) throws SQLException {
+        try {
+            return executeAggregationBatch(connection, tableNames, startTime, endTime, window, aggregation,
+                    timeExpression(aggregation));
+        } catch (SQLException e) {
+            // COLS 与窗口聚合的组合不被支持时，max/min 回退为窗口开始时间，保证查询仍可用
+            if (TdengineUtil.isExtremum(aggregation) && supportsCols()) {
+                colsSupported = Boolean.FALSE;
+                log.warn("TDengine 不支持 COLS 聚合时间列，{} 的时间回退为窗口开始时间", aggregation, e);
+                return executeAggregationBatch(connection, tableNames, startTime, endTime, window, aggregation,
+                        TdengineUtil.WINDOW_START_EXPR);
+            }
+            throw e;
+        }
+    }
+
+    /**
+     * 以指定的时间列执行一次窗口聚合查询，时间列统一别名为 {@code ts_time}。
+     */
+    private List<DataPoint> executeAggregationBatch(Connection connection, List<String> tableNames, long startTime,
+            long endTime, String window, String aggregation, String timeExpression) throws SQLException {
         String placeholders = String.join(",", Collections.nCopies(tableNames.size(), "?"));
-        String sql = "SELECT `sensorId`, `deviceId`, _wend, " + aggregation + "(v) AS v FROM "
-                + CommonUtils.quote(superTableName)
+        String sql = "SELECT `sensorId`, `deviceId`, " + timeExpression + " AS ts_time, " + aggregation
+                + "(v) AS v FROM " + CommonUtils.quote(superTableName)
                 + " WHERE tbname IN (" + placeholders + ") AND ts >= ? AND ts <= ?"
                 + " PARTITION BY tbname INTERVAL(" + window + ")";
         try (PreparedStatement ps = connection.prepareStatement(sql)) {
@@ -202,12 +228,12 @@ public class TdengineClient implements TimeSeriesClient, AutoCloseable {
             try (ResultSet rs = ps.executeQuery()) {
                 List<DataPoint> result = new ArrayList<>();
                 while (rs.next()) {
-                    Timestamp windowEnd = rs.getTimestamp("_wend");
-                    if (windowEnd == null) {
+                    Timestamp tm = rs.getTimestamp("ts_time");
+                    if (tm == null) {
                         continue;
                     }
                     result.add(new DataPoint(rs.getString("sensorId"), rs.getString("deviceId"),
-                            windowEnd.getTime(), rs.getFloat("v")));
+                            tm.getTime(), rs.getFloat("v")));
                 }
                 return result;
             }
@@ -215,21 +241,52 @@ public class TdengineClient implements TimeSeriesClient, AutoCloseable {
     }
 
     /**
-     * 校验每个数据点的 deviceId/sensorId，并收集去重后的子表名，保持首次出现的顺序。
+     * 按聚合方式决定结果点使用的时间列：
+     * <ul>
+     * <li>avg：窗口结束时间 {@code _wend}，均值不属于任何一条记录；</li>
+     * <li>first / last：窗口内首条、末条记录的真实时间；</li>
+     * <li>max / min：极值所在记录的真实时间，由 COLS 函数取回（需服务端 3.3.6.0 及以上），
+     * 否则回退为窗口开始时间。</li>
+     * </ul>
      */
-    private static List<String> collectTableNames(List<DataPoint> dataPoints) {
-        Set<String> tableNames = new LinkedHashSet<>();
-        for (DataPoint dataPoint : dataPoints) {
-            if (dataPoint == null) {
-                throw new IllegalArgumentException("dataPoints 中存在空元素");
-            }
-            String deviceId = dataPoint.getDeviceId();
-            String sensorId = dataPoint.getSid();
-            CommonUtils.requireNotBlank(deviceId, "deviceId");
-            CommonUtils.requireNotBlank(sensorId, "sensorId");
-            tableNames.add("s_" + deviceId + "_" + sensorId);
+    private String timeExpression(String aggregation) {
+        return switch (aggregation) {
+            case "avg" -> TdengineUtil.WINDOW_END_EXPR;
+            case "first" -> "FIRST(ts)";
+            case "last" -> "LAST(ts)";
+            case "max", "min" -> supportsCols()
+                    ? "COLS(" + aggregation.toUpperCase(Locale.ROOT) + "(v), ts)"
+                    : TdengineUtil.WINDOW_START_EXPR;
+            default -> throw new IllegalArgumentException("不支持的聚合方式: " + aggregation);
+        };
+    }
+
+    /**
+     * 获取服务端是否支持 COLS 函数（3.3.6.0 及以上）。结果缓存，避免每次聚合都查一次版本。
+     */
+    private boolean supportsCols() {
+        Boolean cached = colsSupported;
+        if (cached != null) {
+            return cached;
         }
-        return new ArrayList<>(tableNames);
+        try (Connection connection = dataSource.getConnection();
+                Statement st = connection.createStatement();
+                ResultSet rs = st.executeQuery("SELECT SERVER_VERSION()")) {
+            if (!rs.next()) {
+                return false;
+            }
+            String version = rs.getString(1);
+            boolean supported = TdengineUtil.isVersionAtLeast(version);
+            colsSupported = supported;
+            if (!supported) {
+                log.warn("TDengine 服务端版本 {} 低于 3.3.6.0，max/min 聚合的时间回退为窗口开始时间", version);
+            }
+            return supported;
+        } catch (SQLException e) {
+            // 探测失败不写缓存，下次聚合时重试
+            log.warn("探测 TDengine 服务端版本失败，{}", e.getMessage());
+            return false;
+        }
     }
 
     @Override
@@ -266,39 +323,6 @@ public class TdengineClient implements TimeSeriesClient, AutoCloseable {
         }
     }
 
-    /**
-     * 数据封装 - 单输出值查询
-     *
-     * @author ZhenYu Chi
-     * @date 2026/8/25 09:07
-     */
-    private List<DataPoint> getDataPoints(PreparedStatement ps, String sensorId) throws SQLException {
-        try (ResultSet rs = ps.executeQuery()) {
-            List<DataPoint> result = new ArrayList<>();
-            while (rs.next()) {
-                result.add(new DataPoint(sensorId, rs.getTimestamp("ts").getTime(), rs.getFloat("v")));
-            }
-            return result;
-        }
-    }
-
-    /**
-     * 数据封装 - 多输出值查询
-     *
-     * @author ZhenYu Chi
-     * @date 2026/8/25 09:07
-     */
-    private List<DataPoint> getDataPoints(PreparedStatement ps) throws SQLException {
-        try (ResultSet rs = ps.executeQuery()) {
-            List<DataPoint> result = new ArrayList<>();
-            while (rs.next()) {
-                result.add(new DataPoint(rs.getString("sensorId"),
-                        rs.getTimestamp("ts").getTime(), rs.getFloat("v")));
-            }
-            return result;
-        }
-    }
-
     @Override
     public PageResult<DataPoint> queryPage(String deviceId, String sensorId, long startTime, long endTime, int page,
             int limit) {
@@ -329,7 +353,7 @@ public class TdengineClient implements TimeSeriesClient, AutoCloseable {
                 ps.setString(2, sensorId);
                 ps.setTimestamp(3, new Timestamp(startTime));
                 ps.setTimestamp(4, new Timestamp(endTime));
-                return new PageResult<>(getDataPoints(ps, sensorId), total, page, limit);
+                return new PageResult<>(TdengineUtil.getDataPoints(ps, sensorId), total, page, limit);
             }
         } catch (SQLException e) {
             throw new IllegalStateException("TDengine 分页查询失败: " + sensorId, e);
@@ -408,7 +432,7 @@ public class TdengineClient implements TimeSeriesClient, AutoCloseable {
         CommonUtils.requireNotBlank(deviceId, "deviceId");
 
         // 单条写入用内联文本只需一次往返，能显著降低单点写入延迟。
-        String sql = "INSERT INTO " + quoteSubTable(deviceId + "_" + sensorId)
+        String sql = "INSERT INTO " + TdengineUtil.quoteSubTable(deviceId + "_" + sensorId)
                 + " USING " + CommonUtils.quote(superTableName)
                 + " TAGS ('" + sensorId + "', '" + deviceId + "')"
                 + " VALUES (" + dataPoint.getTm() + ", " + dataPoint.getValue() + ")";
@@ -446,7 +470,7 @@ public class TdengineClient implements TimeSeriesClient, AutoCloseable {
                 } else {
                     sql.append(' ');
                 }
-                sql.append(quoteSubTable(deviceId + "_" + sensorId)).append(" USING ")
+                sql.append(TdengineUtil.quoteSubTable(deviceId + "_" + sensorId)).append(" USING ")
                         .append(CommonUtils.quote(superTableName))
                         .append(" TAGS ('").append(sensorId).append("', '").append(deviceId).append("') VALUES ");
                 for (int i = 0; i < points.size(); i++) {
@@ -543,14 +567,4 @@ public class TdengineClient implements TimeSeriesClient, AutoCloseable {
         }
     }
 
-    /**
-     * 对子表标识符进行 SQL 转义，添加反引号。
-     *
-     * @param identifier 子表标识符
-     * @return
-     */
-    private static String quoteSubTable(String identifier) {
-        CommonUtils.requireNotBlank(identifier, "identifier");
-        return CommonUtils.quote("s_" + identifier);
-    }
 }
