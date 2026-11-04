@@ -243,14 +243,6 @@ public class TdengineClient implements TimeSeriesClient, AutoCloseable {
 
     /**
      * 把聚合结果值统一转成 float。
-     *
-     * <p>
-     * 聚合结果的实际类型随函数而变：avg 返回 DOUBLE（驱动里是 Double），first/last/max/min
-     * 返回 FLOAT（Float），UBIGINT 系为 BigDecimal。taos-jdbcdriver 的 getFloat/getDouble 会用
-     * {@code BigDecimal.compareTo(MIN_VALUE)} 做范围校验，值为 0 或负数时误判越界并抛
-     * {@code 0x2314 ... outside valid range for the jdbcType}，因此这里走不做校验的 getObject，
-     * 再按 Number 自行收窄。
-     * </p>
      */
     private static float toFloat(Object raw) {
         if (raw instanceof Number number) {
