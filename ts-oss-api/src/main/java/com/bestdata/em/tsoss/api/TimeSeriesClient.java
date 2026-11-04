@@ -63,7 +63,7 @@ public interface TimeSeriesClient {
      * 每个窗口返回一个数据点。其 {@code tm} 的含义随 {@code way} 而定：
      * </p>
      * <ul>
-     * <li>{@code avg}：窗口结束时间（均值不对应单条记录）；</li>
+     * <li>{@code avg}：窗口开始时间（均值不对应单条记录）；</li>
      * <li>{@code first} / {@code last}：窗口内首条、末条记录的真实时间；</li>
      * <li>{@code max} / {@code min}：极值所在记录的真实时间；底层引擎不支持时回退为窗口开始时间。</li>
      * </ul>

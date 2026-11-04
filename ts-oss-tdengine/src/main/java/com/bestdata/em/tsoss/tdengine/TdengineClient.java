@@ -254,7 +254,7 @@ public class TdengineClient implements TimeSeriesClient, AutoCloseable {
     /**
      * 按聚合方式决定结果点使用的时间列：
      * <ul>
-     * <li>avg：窗口结束时间 {@code _wend}，均值不属于任何一条记录；</li>
+     * <li>avg：窗口开始时间 {@code _wstart}，均值不属于任何一条记录；</li>
      * <li>first / last：窗口内首条、末条记录的真实时间；</li>
      * <li>max / min：极值所在记录的真实时间，由 COLS 函数取回（需服务端 3.3.6.0 及以上），
      * 否则回退为窗口开始时间。</li>
@@ -262,7 +262,7 @@ public class TdengineClient implements TimeSeriesClient, AutoCloseable {
      */
     private String timeExpression(String aggregation) {
         return switch (aggregation) {
-            case "avg" -> TdengineUtil.WINDOW_END_EXPR;
+            case "avg" -> TdengineUtil.WINDOW_START_EXPR;
             case "first" -> "FIRST(ts)";
             case "last" -> "LAST(ts)";
             case "max", "min" -> supportsCols()
