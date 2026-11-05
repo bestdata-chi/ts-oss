@@ -4,13 +4,18 @@ import com.bestdata.em.tsoss.api.DatabaseType;
 import com.bestdata.em.tsoss.api.TimeSeriesClient;
 import com.bestdata.em.tsoss.api.TimeSeriesClientFactory;
 import com.bestdata.em.tsoss.core.ConfigUtils;
+import com.bestdata.em.tsoss.tdengine.utils.TdengineWindowResolver;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import javax.sql.DataSource;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.time.DateTimeException;
+import java.time.ZoneId;
 import java.util.Map;
 
 /**
@@ -23,6 +28,8 @@ import java.util.Map;
  * </ul>
  */
 public class TdengineClientFactory implements TimeSeriesClientFactory {
+
+    private static final Logger log = LoggerFactory.getLogger(TdengineClientFactory.class);
 
     /** 连接池最大连接数。 */
     private static final int POOL_MAX_SIZE = 10;
@@ -114,6 +121,8 @@ public class TdengineClientFactory implements TimeSeriesClientFactory {
             throw new IllegalArgumentException("TDengine 配置缺少 config.database（URL 中也未指定数据库）");
         }
         String superTableName = database + "DataSTable";
+        ZoneId zoneId = resolveZoneId(config);
+        log.info("TDengine 聚合窗口对齐时区: {}（窗口边界对齐到该时区 00:00）", zoneId);
 
         String jdbcUrl = resolveDatabase(url, database);
         String resolvedUsername = username == null ? "root" : username;
@@ -124,12 +133,32 @@ public class TdengineClientFactory implements TimeSeriesClientFactory {
             dataSource = buildDataSource(jdbcUrl, resolvedUsername, resolvedPassword);
             // 建池后确保超级表存在：ts/v 为列，sensorId/deviceId 为 tag
             ensureSuperTable(dataSource, superTableName);
-            return new TdengineClient(dataSource, superTableName);
+            return new TdengineClient(dataSource, superTableName, zoneId);
         } catch (SQLException e) {
             if (dataSource != null) {
                 dataSource.close();
             }
             throw new IllegalStateException("TDengine 连接失败: " + jdbcUrl + "，原因: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * 解析聚合窗口对齐使用的时区。
+     *
+     * <p>
+     * 优先取配置中的 {@code time-zone}（也可写作 {@code timeZone} / {@code time_zone}），
+     * 形如 {@code Asia/Shanghai}；未配置时默认使用 {@code Asia/Shanghai}。窗口边界会对齐到该时区的 00:00。
+     * </p>
+     */
+    private static ZoneId resolveZoneId(Map<String, Object> config) {
+        String timeZone = ConfigUtils.getString(config, "time-zone", "timeZone", "time_zone");
+        if (timeZone == null || timeZone.isBlank()) {
+            return TdengineWindowResolver.DEFAULT_ZONE_ID;
+        }
+        try {
+            return ZoneId.of(timeZone);
+        } catch (DateTimeException e) {
+            throw new IllegalArgumentException("TDengine 配置 time-zone 非法: " + timeZone, e);
         }
     }
 

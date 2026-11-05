@@ -53,6 +53,9 @@ time-series-database:
         username: root
         password: taosdata
         database: em6
+        # 可选，聚合窗口对齐使用的时区；不配置时默认 Asia/Shanghai。
+        # 6h/12h/24h 等窗口边界会对齐到该时区的 00:00
+        time-zone: Asia/Shanghai
 ```
 
 ### Apache IoTDB

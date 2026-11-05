@@ -68,6 +68,12 @@ public interface TimeSeriesClient {
      * <li>{@code max} / {@code min}：极值所在记录的真实时间；底层引擎不支持时回退为窗口开始时间。</li>
      * </ul>
      *
+     * <p>
+     * 窗口边界一律对齐到配置时区的本地 00:00，例如 6h 的窗口为 00:00–06:00、06:00–12:00……，
+     * 而不是对齐到 UTC 0 点（在 UTC+8 下会偏移成 08:00 起）。时区见各实现的连接配置
+     * （TDengine 为 {@code time-zone}，未配置时默认 {@code Asia/Shanghai}）。
+     * </p>
+     *
      * @param dataPoints 待聚合的传感点列表（每个元素需提供 deviceId 与 sid）
      * @param startTime  起始时间（毫秒）
      * @param endTime    结束时间（毫秒）
